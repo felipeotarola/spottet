@@ -1,4 +1,4 @@
-import { Loader } from "@googlemaps/js-api-loader";
+import { googleMapsLoader } from "./google-maps-loader";
 
 export interface PlaceResult {
   id: string;
@@ -13,23 +13,17 @@ export interface PlaceResult {
 }
 
 export class GooglePlacesService {
-  private placesService: google.maps.places.PlacesService | null = null;
+  private PlaceClass: typeof google.maps.places.Place | null = null;
   private isLoaded = false;
 
   async initialize(): Promise<void> {
     if (this.isLoaded) return;
 
-    const loader = new Loader({
-      apiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!,
-      version: "weekly",
-      libraries: ["places"]
-    });
-
-    await loader.load();
+    await googleMapsLoader.load();
     
-    // Create a dummy map element for PlacesService (required by Google)
-    const dummyMap = new google.maps.Map(document.createElement('div'));
-    this.placesService = new google.maps.places.PlacesService(dummyMap);
+    // Import the new Places library
+    const { Place } = await google.maps.importLibrary("places") as google.maps.PlacesLibrary;
+    this.PlaceClass = Place;
     this.isLoaded = true;
   }
 
@@ -37,126 +31,126 @@ export class GooglePlacesService {
     location: google.maps.LatLngLiteral,
     radius: number = 5000
   ): Promise<PlaceResult[]> {
-    if (!this.placesService) {
+    if (!this.PlaceClass) {
       await this.initialize();
     }
 
-    return new Promise((resolve, reject) => {
-      if (!this.placesService) {
-        reject(new Error("Places service not initialized"));
-        return;
-      }
+    if (!this.PlaceClass) {
+      throw new Error("Places service not initialized");
+    }
 
-      const request: google.maps.places.PlaceSearchRequest = {
-        location,
-        radius,
-        keyword: "water fountain drinking fountain vattenpost dricksvatten water tap",
-        type: "point_of_interest"
+    try {
+      const request: google.maps.places.SearchNearbyRequest = {
+        fields: ["id", "displayName", "formattedAddress", "location", "rating", "regularOpeningHours", "photos"],
+        locationRestriction: {
+          center: location,
+          radius: radius,
+        },
+        // Search for water fountains using text-based search with nearby location constraint
+        includedPrimaryTypes: ["tourist_attraction", "park"], // Include common places where fountains might be found
+        maxResultCount: 20,
+        rankPreference: google.maps.places.SearchNearbyRankPreference.DISTANCE,
+        language: "sv",
+        region: "se",
       };
 
-      this.placesService.nearbySearch(request, (results, status) => {
-        if (status === google.maps.places.PlacesServiceStatus.OK && results) {
-          const places: PlaceResult[] = results
-            .filter(place => place.geometry?.location && place.place_id)
-            .map(place => ({
-              id: place.place_id!,
-              name: place.name || "Dricksvattenfontän",
-              address: place.vicinity || "Okänd adress",
-              lat: place.geometry!.location!.lat(),
-              lng: place.geometry!.location!.lng(),
-              rating: place.rating || 0,
-              isOpen: place.opening_hours?.open_now ?? true,
-              placeId: place.place_id!,
-              photos: place.photos?.map(photo => 
-                photo.getUrl({ maxWidth: 400, maxHeight: 300 })
-              )
-            }));
+      const { places } = await this.PlaceClass.searchNearby(request);
 
-          resolve(places);
-        } else {
-          reject(new Error(`Places search failed: ${status}`));
-        }
-      });
-    });
+      // Filter and map results to match our interface
+      const fountainPlaces: PlaceResult[] = places
+        .filter(place => place.location && place.id)
+        .map(place => ({
+          id: place.id!,
+          name: place.displayName || "Dricksvattenfontän",
+          address: place.formattedAddress || "Okänd adress",
+          lat: place.location!.lat(),
+          lng: place.location!.lng(),
+          rating: place.rating || 0,
+          isOpen: true, // For now, assume open - we'll enhance this later
+          placeId: place.id!,
+          photos: place.photos?.map(photo => 
+            photo.getURI({ maxWidth: 400, maxHeight: 300 })
+          ) || []
+        }));
+
+      return fountainPlaces;
+    } catch (error) {
+      throw new Error(`Places search failed: ${error}`);
+    }
   }
 
   async searchFountainsByText(query: string, location?: google.maps.LatLngLiteral): Promise<PlaceResult[]> {
-    if (!this.placesService) {
+    if (!this.PlaceClass) {
       await this.initialize();
     }
 
-    return new Promise((resolve, reject) => {
-      if (!this.placesService) {
-        reject(new Error("Places service not initialized"));
-        return;
-      }
+    if (!this.PlaceClass) {
+      throw new Error("Places service not initialized");
+    }
 
-      const request: google.maps.places.TextSearchRequest = {
-        query: `${query} water fountain drinking fountain dricksvatten`,
-        location,
-        radius: location ? 10000 : undefined
+    try {
+      const request: google.maps.places.SearchByTextRequest = {
+        fields: ["id", "displayName", "formattedAddress", "location", "rating", "regularOpeningHours", "photos"],
+        textQuery: `${query} water fountain drinking fountain dricksvatten vattenpost`,
+        locationBias: location ? { center: location, radius: 10000 } : undefined,
+        maxResultCount: 20,
+        language: "sv",
+        region: "se",
       };
 
-      this.placesService.textSearch(request, (results, status) => {
-        if (status === google.maps.places.PlacesServiceStatus.OK && results) {
-          const places: PlaceResult[] = results
-            .filter(place => place.geometry?.location && place.place_id)
-            .map(place => ({
-              id: place.place_id!,
-              name: place.name || "Dricksvattenfontän",
-              address: place.formatted_address || place.vicinity || "Okänd adress",
-              lat: place.geometry!.location!.lat(),
-              lng: place.geometry!.location!.lng(),
-              rating: place.rating || 0,
-              isOpen: place.opening_hours?.open_now ?? true,
-              placeId: place.place_id!,
-              photos: place.photos?.map(photo => 
-                photo.getUrl({ maxWidth: 400, maxHeight: 300 })
-              )
-            }));
+      const { places } = await this.PlaceClass.searchByText(request);
 
-          resolve(places);
-        } else {
-          reject(new Error(`Text search failed: ${status}`));
-        }
-      });
-    });
+      const fountainPlaces: PlaceResult[] = places
+        .filter(place => place.location && place.id)
+        .map(place => ({
+          id: place.id!,
+          name: place.displayName || "Dricksvattenfontän",
+          address: place.formattedAddress || "Okänd adress",
+          lat: place.location!.lat(),
+          lng: place.location!.lng(),
+          rating: place.rating || 0,
+          isOpen: true, // For now, assume open - we'll enhance this later
+          placeId: place.id!,
+          photos: place.photos?.map(photo => 
+            photo.getURI({ maxWidth: 400, maxHeight: 300 })
+          ) || []
+        }));
+
+      return fountainPlaces;
+    } catch (error) {
+      throw new Error(`Text search failed: ${error}`);
+    }
   }
 
-  async getPlaceDetails(placeId: string): Promise<google.maps.places.PlaceResult | null> {
-    if (!this.placesService) {
+  async getPlaceDetails(placeId: string): Promise<google.maps.places.Place | null> {
+    if (!this.PlaceClass) {
       await this.initialize();
     }
 
-    return new Promise((resolve, reject) => {
-      if (!this.placesService) {
-        reject(new Error("Places service not initialized"));
-        return;
-      }
+    if (!this.PlaceClass) {
+      throw new Error("Places service not initialized");
+    }
 
-      const request: google.maps.places.PlaceDetailsRequest = {
-        placeId,
-        fields: [
-          'name', 
-          'formatted_address', 
-          'geometry', 
-          'rating', 
-          'opening_hours', 
-          'photos', 
-          'website',
-          'formatted_phone_number',
-          'reviews'
-        ]
-      };
+    try {
+      const place = new this.PlaceClass({ id: placeId });
+      
+      const fields = [
+        'displayName', 
+        'formattedAddress', 
+        'location', 
+        'rating', 
+        'regularOpeningHours', 
+        'photos', 
+        'websiteURI',
+        'nationalPhoneNumber',
+        'reviews'
+      ];
 
-      this.placesService.getDetails(request, (place, status) => {
-        if (status === google.maps.places.PlacesServiceStatus.OK && place) {
-          resolve(place);
-        } else {
-          reject(new Error(`Place details failed: ${status}`));
-        }
-      });
-    });
+      await place.fetchFields({ fields });
+      return place;
+    } catch (error) {
+      throw new Error(`Place details failed: ${error}`);
+    }
   }
 }
 

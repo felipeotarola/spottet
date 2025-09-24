@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader } from "@googlemaps/js-api-loader";
+import { googleMapsLoader } from "@/lib/google-maps-loader";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -40,20 +40,22 @@ export default function GoogleMapsComponent({
   const markersRef = useRef<google.maps.Marker[]>([]);
   const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
   const [userLocation, setUserLocation] = useState<google.maps.LatLngLiteral | null>(null);
-  const [placesService, setPlacesService] = useState<google.maps.places.PlacesService | null>(null);
+
   const [isLoading, setIsLoading] = useState(true);
+  const [searchStatus, setSearchStatus] = useState<string>("Initierar karta...");
 
   // Initialize Google Maps
   useEffect(() => {
     const initMap = async () => {
-      const loader = new Loader({
-        apiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!,
-        version: "weekly",
-        libraries: ["places", "geometry"]
-      });
-
       try {
-        await loader.load();
+        await googleMapsLoader.load();
+        
+        // Wait for the map ref to be available
+        let attempts = 0;
+        while (!mapRef.current && attempts < 10) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          attempts++;
+        }
         
         if (mapRef.current) {
           // Default to Stockholm center
@@ -62,26 +64,6 @@ export default function GoogleMapsComponent({
           const map = new google.maps.Map(mapRef.current, {
             center: defaultCenter,
             zoom: 13,
-            mapId: process.env.NEXT_PUBLIC_GOOGLE_MAPS_STYLE_ID,
-            styles: [
-              {
-                featureType: "poi.business",
-                stylers: [{ visibility: "off" }]
-              },
-              {
-                featureType: "poi.medical",
-                stylers: [{ visibility: "off" }]
-              },
-              {
-                featureType: "transit",
-                stylers: [{ visibility: "simplified" }]
-              },
-              {
-                featureType: "road",
-                elementType: "labels",
-                stylers: [{ visibility: "on" }]
-              }
-            ],
             streetViewControl: false,
             mapTypeControl: false,
             fullscreenControl: true,
@@ -90,18 +72,16 @@ export default function GoogleMapsComponent({
           });
 
           mapInstanceRef.current = map;
-          
-          // Initialize Places Service
-          const places = new google.maps.places.PlacesService(map);
-          setPlacesService(places);
 
           // Initialize InfoWindow
           infoWindowRef.current = new google.maps.InfoWindow();
 
-          // Get user location
+          // Get user location with proper error handling
           if (navigator.geolocation) {
+            setSearchStatus("Begär din position...");
+            
             navigator.geolocation.getCurrentPosition(
-              (position) => {
+              async (position) => {
                 const userPos = {
                   lat: position.coords.latitude,
                   lng: position.coords.longitude
@@ -134,19 +114,49 @@ export default function GoogleMapsComponent({
                   radius: position.coords.accuracy || 100
                 });
 
-                // Search for nearby water fountains using Places API
-                searchNearbyFountains(userPos, places, map);
+                await searchNearbyFountains(userPos, map);
+                setIsLoading(false);
               },
-              () => {
-                console.log("Geolocation denied, using default location");
-                searchNearbyFountains(defaultCenter, places, map);
+              async (error) => {
+                let errorMessage = "Kunde inte hämta din position";
+                
+                switch(error.code) {
+                  case error.PERMISSION_DENIED:
+                    errorMessage = "Position nekad - använder Stockholm som standard";
+                    break;
+                  case error.POSITION_UNAVAILABLE:
+                    errorMessage = "Position otillgänglig - använder Stockholm som standard";
+                    break;
+                  case error.TIMEOUT:
+                    errorMessage = "Position timeout - använder Stockholm som standard";
+                    break;
+                }
+                
+                setSearchStatus(errorMessage);
+                await searchNearbyFountains(defaultCenter, map);
+                setIsLoading(false);
+                
+                // Clear error message after 3 seconds
+                setTimeout(() => setSearchStatus(""), 3000);
+              },
+              {
+                enableHighAccuracy: true,
+                timeout: 10000, // 10 seconds timeout
+                maximumAge: 300000 // 5 minutes cache
               }
             );
           } else {
-            searchNearbyFountains(defaultCenter, places, map);
+            setSearchStatus("Geolocation stöds inte - använder Stockholm");
+            await searchNearbyFountains(defaultCenter, map);
+            setIsLoading(false);
+            
+            // Clear message after 3 seconds
+            setTimeout(() => setSearchStatus(""), 3000);
           }
+        } else {
+          console.error("Map ref is null");
+          setIsLoading(false);
         }
-        setIsLoading(false);
       } catch (error) {
         console.error("Error loading Google Maps:", error);
         setIsLoading(false);
@@ -156,34 +166,99 @@ export default function GoogleMapsComponent({
     initMap();
   }, []);
 
-  // Search for nearby water fountains using Places API
-  const searchNearbyFountains = (center: google.maps.LatLngLiteral, places: google.maps.places.PlacesService, map: google.maps.Map) => {
-    const request: google.maps.places.PlaceSearchRequest = {
-      location: center,
-      radius: 5000, // 5km radius
-      keyword: "water fountain drinking fountain vattenpost dricksvatten",
-      type: "point_of_interest"
-    };
+  // Search for nearby water fountains using new Places API
+  const searchNearbyFountains = async (center: google.maps.LatLngLiteral, map: google.maps.Map) => {
+    let foundPlacesCount = 0;
+    
+    try {
+      setSearchStatus("Importerar Places-bibliotek...");
+      
+      // Import the new Places library
+      const { Place } = await google.maps.importLibrary("places") as google.maps.PlacesLibrary;
+      
+      setSearchStatus("Söker efter vattenfontäner...");
+      
+      // Search for water fountains using text search (more effective for specific items like fountains)
+      const textRequest: google.maps.places.SearchByTextRequest = {
+        fields: ["id", "displayName", "formattedAddress", "location", "rating", "photos"],
+        textQuery: "water fountain drinking fountain vattenpost dricksvatten drinking water source",
+        locationBias: { center: center, radius: 5000 },
+        maxResultCount: 20,
+        language: "sv",
+        region: "se",
+      };
 
-    places.nearbySearch(request, (results, status) => {
-      if (status === google.maps.places.PlacesServiceStatus.OK && results) {
-        results.forEach((place, index) => {
-          if (place.geometry && place.geometry.location) {
+      const { places } = await Place.searchByText(textRequest);
+      
+      if (places && places.length > 0) {
+        places.forEach((place, index) => {
+          if (place.location) {
             addFountainMarker(place, map, index);
+            foundPlacesCount++;
           }
         });
       }
-    });
+
+      setSearchStatus("Söker efter parker och turistattraktioner...");
+      
+      // Also search nearby for parks and tourist attractions where fountains might be located
+      const nearbyRequest: google.maps.places.SearchNearbyRequest = {
+        fields: ["id", "displayName", "formattedAddress", "location", "rating", "photos"],
+        locationRestriction: {
+          center: center,
+          radius: 2000, // Smaller radius for more targeted results
+        },
+        includedPrimaryTypes: ["park", "tourist_attraction"],
+        maxResultCount: 10,
+        rankPreference: google.maps.places.SearchNearbyRankPreference.DISTANCE,
+        language: "sv",
+        region: "se",
+      };
+
+      const { places: nearbyPlaces } = await Place.searchNearby(nearbyRequest);
+      
+      if (nearbyPlaces && nearbyPlaces.length > 0) {
+        // Filter for places that might have water fountains
+        const filteredPlaces = nearbyPlaces.filter(place => {
+          const name = place.displayName?.toLowerCase() || '';
+          return name.includes('park') || name.includes('fountain') || name.includes('vatten');
+        });
+        
+        filteredPlaces.forEach((place, index) => {
+          if (place.location) {
+            addFountainMarker(place, map, index + 100); // Offset index to avoid conflicts
+            foundPlacesCount++;
+          }
+        });
+      }
+
+      const statusMessage = foundPlacesCount > 0 
+        ? `Hittade ${foundPlacesCount} potentiella fontäner` 
+        : "Inga fontäner hittades i närområdet";
+      
+      setSearchStatus(statusMessage);
+      
+      // Hide status after 3 seconds
+      setTimeout(() => setSearchStatus(""), 3000);
+      
+    } catch (error) {
+      console.error("Error searching for fountains:", error);
+      setSearchStatus("Fel vid sökning efter fontäner. Kontrollera att Places API (New) är aktiverat.");
+      setIsLoading(false); // Make sure to set loading to false even on error
+      
+      // Hide error after 5 seconds
+      setTimeout(() => setSearchStatus(""), 5000);
+    }
   };
 
   // Add fountain markers to map
-  const addFountainMarker = (place: google.maps.places.PlaceResult, map: google.maps.Map, index: number) => {
-    if (!place.geometry?.location) return;
+  const addFountainMarker = (place: google.maps.places.Place, map: google.maps.Map, index: number) => {
+    if (!place.location) return;
 
     const marker = new google.maps.Marker({
-      position: place.geometry.location,
+      position: place.location,
       map: map,
-      title: place.name,
+      title: place.displayName || "Water Fountain",
       icon: {
         url: "data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24'%3E%3Cpath d='M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z' fill='%232563EB'/%3E%3Ccircle cx='12' cy='9' r='2.5' fill='white'/%3E%3C/svg%3E",
         scaledSize: new google.maps.Size(40, 40),
@@ -194,14 +269,14 @@ export default function GoogleMapsComponent({
 
     // Add click listener for marker
     marker.addListener("click", () => {
-      if (infoWindowRef.current && place.geometry?.location) {
+      if (infoWindowRef.current && place.location) {
         const distance = userLocation ? 
           google.maps.geometry.spherical.computeDistanceBetween(
             new google.maps.LatLng(userLocation.lat, userLocation.lng),
-            place.geometry.location
+            place.location
           ) / 1000 : 0;
 
-        const content = createInfoWindowContent(place, distance);
+        const content = createNewInfoWindowContent(place, distance);
         infoWindowRef.current.setContent(content);
         infoWindowRef.current.open(map, marker);
       }
@@ -210,7 +285,7 @@ export default function GoogleMapsComponent({
     markersRef.current.push(marker);
   };
 
-  // Create info window content
+  // Create info window content for legacy places
   const createInfoWindowContent = (place: google.maps.places.PlaceResult, distance: number) => {
     const rating = place.rating || 0;
     const isOpen = place.opening_hours?.open_now ?? true;
@@ -236,6 +311,40 @@ export default function GoogleMapsComponent({
             🧭 Navigera
           </button>
           <button onclick="sharePlace('${place.name}', '${place.vicinity}')" 
+                  style="background: #6b7280; color: white; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">
+            🔗 Dela
+          </button>
+        </div>
+      </div>
+    `;
+  };
+
+  // Create info window content for new Place class
+  const createNewInfoWindowContent = (place: google.maps.places.Place, distance: number) => {
+    const rating = place.rating || 0;
+    const isOpen = true; // For now, assume open - we'll enhance this later
+    
+    return `
+      <div style="max-width: 300px; padding: 12px;">
+        <h3 style="margin: 0 0 8px 0; font-weight: 600; color: #1f2937;">
+          ${place.displayName || 'Dricksvattenfontän'}
+        </h3>
+        <p style="margin: 0 0 8px 0; font-size: 14px; color: #6b7280;">
+          ${place.formattedAddress || 'Okänd adress'}
+        </p>
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 12px; color: #6b7280;">
+          <span>📍 ${distance.toFixed(1)} km</span>
+          <span>⭐ ${rating.toFixed(1)}</span>
+          <span style="color: ${isOpen ? '#059669' : '#dc2626'};">
+            ${isOpen ? '🟢 Potentiell fontän' : '🔴 Stängd'}
+          </span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button onclick="navigateToPlace('${place.id}')" 
+                  style="background: #2563eb; color: white; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">
+            🧭 Navigera
+          </button>
+          <button onclick="sharePlace('${place.displayName}', '${place.formattedAddress}')" 
                   style="background: #6b7280; color: white; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">
             🔗 Dela
           </button>
@@ -371,31 +480,30 @@ export default function GoogleMapsComponent({
     };
   }, [onToggleFavorite]);
 
-  if (isLoading) {
-    return (
-      <div className="h-full bg-gradient-to-br from-blue-50 to-cyan-50 flex items-center justify-center">
-        <Card className="w-80 shadow-xl">
-          <CardContent className="p-8 text-center">
-            <div className="relative mb-6">
-              <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-              <MapPin className="w-6 h-6 text-blue-600 absolute top-3 left-1/2 transform -translate-x-1/2" />
-            </div>
-            <h3 className="text-lg font-semibold text-gray-800 mb-2">Laddar Spottet</h3>
-            <p className="text-sm text-gray-600">Hämtar kartan och närliggande fontäner...</p>
-            <div className="mt-4 flex justify-center space-x-2">
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div className="relative h-full">
       <div ref={mapRef} className="h-full w-full" />
+      
+      {/* Loading Overlay */}
+      {isLoading && (
+        <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-cyan-50 flex items-center justify-center z-50">
+          <Card className="w-80 shadow-xl">
+            <CardContent className="p-8 text-center">
+              <div className="relative mb-6">
+                <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
+                <MapPin className="w-6 h-6 text-blue-600 absolute top-3 left-1/2 transform -translate-x-1/2" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-800 mb-2">Laddar Spottet</h3>
+              <p className="text-sm text-gray-600">Hämtar kartan och närliggande fontäner...</p>
+              <div className="mt-4 flex justify-center space-x-2">
+                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
+                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
       
       {/* Map Controls */}
       <div className="absolute top-4 right-4 space-y-2">
@@ -438,6 +546,16 @@ export default function GoogleMapsComponent({
         </Button>
       </div>
 
+      {/* Search Status */}
+      {searchStatus && (
+        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg p-3 max-w-xs">
+          <div className="flex items-center space-x-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-200 border-t-blue-600"></div>
+            <span className="text-sm text-gray-700">{searchStatus}</span>
+          </div>
+        </div>
+      )}
+
       {/* Legend */}
       <div className="absolute bottom-4 left-4 bg-white rounded-lg shadow-lg p-3 space-y-2 max-w-xs">
         <h4 className="text-sm font-semibold text-gray-800 flex items-center">
@@ -446,7 +564,7 @@ export default function GoogleMapsComponent({
         </h4>
         <div className="flex items-center space-x-2 text-xs">
           <div className="w-3 h-3 bg-blue-600 rounded-full"></div>
-          <span className="text-gray-600">Funktionell fontän</span>
+          <span className="text-gray-600">Potentiell fontän</span>
         </div>
         <div className="flex items-center space-x-2 text-xs">
           <div className="w-3 h-3 bg-red-600 rounded-full"></div>
@@ -461,6 +579,9 @@ export default function GoogleMapsComponent({
             ✓ Position hittad
           </div>
         )}
+        <div className="pt-2 border-t text-xs text-blue-600">
+          ✨ Använder nya Places API
+        </div>
       </div>
     </div>
   );
