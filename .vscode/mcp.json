@@ -1,0 +1,53 @@
+{
+  "servers": {
+    "shadcn": {
+      "command": "npx",
+      "args": [
+        "shadcn@latest",
+        "mcp"
+      ]
+    },
+     "stripe": {
+      "type": "http",
+      "url": "https://mcp.stripe.com"
+    },
+        "supabase": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@supabase/mcp-server-supabase@latest",
+        "--access-token",
+        "sbp_baafc7b589248f760c4a0522d86171a8e33fef55"
+      ],
+    },
+     "google-maps-platform-code-assist": {
+      "command": "npx",
+      "args": [
+        "-y", "@googlemaps/code-assist-mcp@latest"
+      ]
+    },
+    "ElevenLabs": {
+      "command": "C:\\Users\\feot1\\.local\\bin\\elevenlabs-mcp.exe",
+      "args": [],
+      "env": {
+        "ELEVENLABS_API_KEY": "sk_fb83529f00c5101ec9c062349c76c3c5c1db4d72badad828"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    },
+      "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "ctx7sk-3f6428c7-9374-4d4e-92a4-9741b569609a"
+      }
+    }, "vercel": {
+      "url": "https://mcp.vercel.com"
+    }
+    
+  }
+}
